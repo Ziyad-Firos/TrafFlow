@@ -140,14 +140,19 @@ def find_route(
     destination_node: str,
     *,
     required_edge: str | None = None,
+    forbidden_edges: set[str] | None = None,
 ) -> list[str] | None:
     """Find a minimum free-flow-time route, optionally requiring an edge."""
+    forbidden = forbidden_edges or set()
     edge_by_id = {edge["id"]: edge for edge in network["edges"]}
     outgoing: dict[str, list[str]] = {}
     for connection in network["connections"]:
         if any(lane is not None for lane in connection["lanes"]):
             outgoing.setdefault(connection["from_edge"], []).append(connection["to_edge"])
-    starts = [edge_id for edge_id, edge in edge_by_id.items() if edge["from_node"] == origin_node]
+    starts = [
+        edge_id for edge_id, edge in edge_by_id.items()
+        if edge["from_node"] == origin_node and edge_id not in forbidden
+    ]
     queue: list[tuple[float, str, list[str], bool]] = [
         (edge_by_id[edge_id]["length"] / edge_by_id[edge_id]["speed_limit"], edge_id,
          [edge_id], edge_id == required_edge)
@@ -165,6 +170,8 @@ def find_route(
         if edge["to_node"] == destination_node and (required_edge is None or has_required):
             return path
         for next_id in sorted(outgoing.get(edge_id, [])):
+            if next_id in forbidden:
+                continue
             next_edge = edge_by_id[next_id]
             queue.append((
                 cost + next_edge["length"] / next_edge["speed_limit"],
