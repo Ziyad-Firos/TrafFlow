@@ -62,11 +62,11 @@ def _state(s=99.5):
     [
         (53.8, 100.89),  # step starts green
         (53.97, 100.89), # step starts green, even though the phase changes mid-step
-        (55.97, 99.5),   # step starts yellow: entry is closed
+        (55.97, 100.89), # yellow permits a vehicle committed to crossing this step
         (79.97, 99.5),   # step starts red, even though green begins mid-step
     ],
 )
-def test_signal_phase_at_step_start_gates_stop_line_entry(time_s, expected_s):
+def test_signal_phase_and_yellow_commitment_gate_stop_line_entry(time_s, expected_s):
     vehicles, lanes = _state()
 
     step_network(
@@ -84,7 +84,89 @@ def test_signal_phase_at_step_start_gates_stop_line_entry(time_s, expected_s):
     assert vehicles[1].s == pytest.approx(expected_s, abs=1e-9)
 
 
-def test_vehicle_already_past_stop_line_continues_during_red():
+def test_s1_yellow_dilemma_zone_commits_vehicle_with_insufficient_stopping_distance():
+    vehicles, lanes = _state(s=96.5)
+
+    step_network(
+        vehicles,
+        lanes,
+        _signal_network(),
+        {1: "car"},
+        {"car": CAR},
+        dt=0.1,
+        time_s=55.97,
+        signals={"J": SIGNAL},
+    )
+
+    # Stopping distance 13.9^2/(2*3)=32.2017m exceeds the 3.5m to the line.
+    # It proceeds at v=13.9, moving 1.39m to s=97.89 during this step.
+    assert vehicles[1].v == pytest.approx(13.9, abs=1e-9)
+    assert vehicles[1].s == pytest.approx(97.89, abs=1e-9)
+
+
+def test_yellow_dilemma_zone_applies_phantom_when_comfortable_stop_is_possible():
+    vehicles, lanes = _state(s=50.0)
+
+    step_network(
+        vehicles,
+        lanes,
+        _signal_network(),
+        {1: "car"},
+        {"car": CAR},
+        dt=0.1,
+        time_s=55.97,
+        signals={"J": SIGNAL},
+    )
+
+    # Stopping distance=32.2017m < 50m. With gap=50m to a stationary phantom,
+    # s*=78.6249m, a=-3.70913m/s^2, v_new=13.52909m/s, s_new=51.35291m.
+    assert vehicles[1].v == pytest.approx(13.5290872913, abs=1e-8)
+    assert vehicles[1].s == pytest.approx(51.3529087291, abs=1e-8)
+
+
+def test_yellow_commits_vehicle_at_s_99_and_allows_crossing():
+    vehicles, lanes = _state(s=99.0)
+
+    step_network(
+        vehicles,
+        lanes,
+        _signal_network(),
+        {1: "car"},
+        {"car": CAR},
+        dt=0.1,
+        time_s=55.97,
+        signals={"J": SIGNAL},
+    )
+
+    assert vehicles[1].s == pytest.approx(100.39, abs=1e-9)
+    assert vehicles[1].edge_id == "edge_A"
+
+
+def test_yellow_dilemma_commitment_persists_into_red_until_line_is_crossed():
+    vehicles, lanes = _state(s=70.0)
+    commitments = {}
+
+    for step in range(22):
+        step_network(
+            vehicles,
+            lanes,
+            _signal_network(),
+            {1: "car"},
+            {"car": CAR},
+            dt=0.1,
+            time_s=54.0 + step * 0.1,
+            signals={"J": SIGNAL},
+            signal_commitments=commitments,
+        )
+
+    # At yellow onset, 13.9^2/6=32.2017m stopping distance exceeds the 30m
+    # remaining. It reaches s=97.8m by red onset and clears at s=100.58m.
+    assert vehicles[1].s == pytest.approx(100.58, abs=1e-8)
+    assert vehicles[1].edge_id == "edge_A"
+    assert 1 not in commitments
+
+
+def test_s4_straddling_vehicle_continues_during_red_without_backward_motion():
     vehicles, lanes = _state(s=100.89)
 
     step_network(

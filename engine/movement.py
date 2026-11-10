@@ -1,12 +1,16 @@
 """Snapshot movement and edge-transition application for the engine."""
 
 from collections.abc import Mapping, MutableMapping
+import math
 from typing import Any
 
 from engine.dynamics import idm_acceleration, symplectic_euler_step
+from engine.invariants import check_no_overlap
 from engine.merges import Approach, MergeSlot, arbitrate_merge_slot
 from engine.scenario import signal_phase_at
 from engine.state import LanesByEdge, Vehicle
+
+COMFORTABLE_BRAKING_MPS2 = 3.0
 
 
 def step_network(
@@ -21,6 +25,7 @@ def step_network(
     merge_state: MutableMapping[MergeSlot, Approach] | None = None,
     time_s: float = 0.0,
     signals: Mapping[str, Mapping[str, Any]] | None = None,
+    signal_commitments: MutableMapping[int, str] | None = None,
 ) -> None:
     """Advance one snapshot step.
 
@@ -50,6 +55,9 @@ def step_network(
             active_merge_state.setdefault(slot, approaches[-1])
     nodes = {node["id"]: node for node in network.get("nodes", [])}
     signal_configs = signals or {}
+    active_signal_commitments: MutableMapping[int, str] = (
+        {} if signal_commitments is None else signal_commitments
+    )
 
     def signal_for_edge(edge_id: str) -> Mapping[str, Any] | None:
         end_node = edges[edge_id].get("to_node")
@@ -63,27 +71,42 @@ def step_network(
             return None
         return signal
 
-    def signal_open_at_step_start(signal: Mapping[str, Any]) -> bool:
+    def signal_phase_at_step_start(signal: Mapping[str, Any]) -> str:
         timing = {
             key: float(signal[key])
             for key in ("cycle_s", "green_s", "yellow_s", "red_s", "offset_s")
             if key in signal
         }
-        return signal_phase_at(timing, time_s) == "green"
+        return signal_phase_at(timing, time_s)
 
-    signal_open_by_edge = {
-        edge_id: (
-            signal is None or signal_open_at_step_start(signal)
-        )
+    signal_by_edge = {edge_id: signal_for_edge(edge_id) for edge_id in edges}
+    signal_node_by_edge = {
+        edge_id: edges[edge_id].get("to_node") if signal_by_edge[edge_id] is not None else None
         for edge_id in edges
-        for signal in (signal_for_edge(edge_id),)
+    }
+    signal_phase_by_edge = {
+        edge_id: (
+            signal_phase_at_step_start(signal) if signal is not None else "green"
+        )
+        for edge_id, signal in signal_by_edge.items()
     }
 
-    def route_next(vehicle: Vehicle) -> str | None:
-        route_index = vehicle.route.index(vehicle.edge_id)
-        return vehicle.route[route_index + 1] if route_index + 1 < len(vehicle.route) else None
+    route_next_cache: dict[tuple[int, str], str | None] = {}
 
-    start_of_step_straddler_rears: dict[tuple[str, int], list[float]] = {}
+    def route_next(vehicle: Vehicle) -> str | None:
+        key = (vehicle.id, vehicle.edge_id)
+        if key in route_next_cache:
+            return route_next_cache[key]
+        route_index = vehicle.route.index(vehicle.edge_id)
+        next_edge = (
+            vehicle.route[route_index + 1]
+            if route_index + 1 < len(vehicle.route)
+            else None
+        )
+        route_next_cache[key] = next_edge
+        return next_edge
+
+    start_of_step_straddler_rears: dict[tuple[str, int], list[tuple[int, float, float]]] = {}
     for existing in vehicles.values():
         current_edge = edges[existing.edge_id]
         next_edge_id = route_next(existing)
@@ -93,27 +116,35 @@ def step_network(
                 front_on_next = existing.s - current_edge["length"]
                 slot = (next_edge_id, mapped_lane)
                 start_of_step_straddler_rears.setdefault(slot, []).append(
-                    front_on_next - existing.length
+                    (existing.id, front_on_next - existing.length, existing.v)
                 )
 
     def entry_head_gap(
         next_edge_id: str,
         next_lane: int,
-        reservations: Mapping[tuple[str, int, int], tuple[float, float]],
-    ) -> float:
-        rear_positions: list[float] = []
+        reservations: Mapping[tuple[str, int, int], tuple[float, float, float]],
+        *,
+        ignore_vehicle_id: int | None = None,
+    ) -> tuple[float, float]:
+        leaders: list[tuple[float, float]] = []
         target_lane = lanes[next_edge_id][next_lane]
         if target_lane:
-            first = min((vehicles[item] for item in target_lane), key=lambda item: (item.s, item.id))
-            rear_positions.append(first.s - first.length)
+            # Engine lanes are kept sorted by (s, id) after every step; only
+            # the lowest-s vehicle constrains the entry point.
+            first = vehicles[target_lane[0]]
+            leaders.append((first.s - first.length, first.v))
         # Use only the start-of-step snapshot here. Vehicles admitted earlier
         # this step are accounted for solely by explicit reservations.
-        rear_positions.extend(start_of_step_straddler_rears.get((next_edge_id, next_lane), ()))
+        leaders.extend(
+            (rear, speed)
+            for vehicle_id, rear, speed in start_of_step_straddler_rears.get((next_edge_id, next_lane), ())
+            if vehicle_id != ignore_vehicle_id
+        )
         if use_reservations:
-            for (reserved_edge, reserved_lane, _), (position_front, length) in reservations.items():
+            for (reserved_edge, reserved_lane, _), (position_front, length, speed) in reservations.items():
                 if reserved_edge == next_edge_id and reserved_lane == next_lane:
-                    rear_positions.append(position_front - length)
-        return min(rear_positions) if rear_positions else edges[next_edge_id]["length"]
+                    leaders.append((position_front - length, speed))
+        return min(leaders, key=lambda item: (item[0], item[1])) if leaders else (edges[next_edge_id]["length"], 0.0)
 
     lane_position: dict[int, tuple[str, int, int]] = {}
     for edge_id, edge_lanes in lanes.items():
@@ -123,6 +154,7 @@ def step_network(
 
     # Snapshot accelerations. A full downstream entry acts as a virtual stop-line leader.
     accelerations: dict[int, float] = {}
+    entry_blocked_by_id: dict[int, bool] = {}
     snapshot_entry_gap_cache: dict[tuple[str, int], float] = {}
     for vehicle_id in sorted(vehicles):
         vehicle = vehicles[vehicle_id]
@@ -141,10 +173,36 @@ def step_network(
                 slot = (next_edge_id, next_lane)
                 if slot not in snapshot_entry_gap_cache:
                     snapshot_entry_gap_cache[slot] = entry_head_gap(next_edge_id, next_lane, {})
-                available = snapshot_entry_gap_cache[slot]
-                entry_blocked = available < type_config["s0_m"] + vehicle.length
+                available, _leader_speed = snapshot_entry_gap_cache[slot]
+                entry_blocked = (
+                    available < type_config["s0_m"]
+                )
+                entry_blocked_by_id[vehicle_id] = entry_blocked
 
-                signal_blocked = not signal_open_by_edge[vehicle.edge_id]
+                signal_phase = signal_phase_by_edge[vehicle.edge_id]
+                signal_node = signal_node_by_edge[vehicle.edge_id]
+                committed = (
+                    signal_node is not None
+                    and active_signal_commitments.get(vehicle_id) == signal_node
+                )
+                yellow_can_stop_comfortably = (
+                    signal_phase == "yellow"
+                    and vehicle.v ** 2 / (2.0 * COMFORTABLE_BRAKING_MPS2)
+                    <= edge["length"] - vehicle.s
+                )
+                if (
+                    signal_phase == "yellow"
+                    and not committed
+                    and not yellow_can_stop_comfortably
+                    and not entry_blocked
+                    and signal_node is not None
+                ):
+                    active_signal_commitments[vehicle_id] = signal_node
+                    committed = True
+                signal_blocked = (
+                    (signal_phase == "red" and not committed)
+                    or (signal_phase == "yellow" and yellow_can_stop_comfortably and not committed)
+                )
 
                 if entry_blocked or signal_blocked:
                     stop_gap = max(1e-9, edge["length"] - vehicle.s)
@@ -168,42 +226,117 @@ def step_network(
         v_new, s_new = symplectic_euler_step(
             s=vehicle.s, v=vehicle.v, a=accelerations[vehicle_id], dt=dt
         )
-        # Speeds cannot become negative; IDM acceleration itself remains unclamped.
+        # Speeds cannot become negative; IDM acceleration is brake-capped.
         v_new = max(0.0, v_new)
         pending[vehicle_id] = (v_new, vehicle.s + v_new * dt)
 
     # Reservations expire each step. Existing straddlers retain occupancy via
     # the snapshot list above; new admissions reserve their downstream footprint.
-    reservations: dict[tuple[str, int, int], tuple[float, float]] = {}
+    reservations: dict[tuple[str, int, int], tuple[float, float, float]] = {}
     merge_candidates: dict[MergeSlot, dict[Approach, list[int]]] = {}
     candidate_values: dict[int, tuple[float, float, str, int]] = {}
 
+    transitioned_by_lane: dict[tuple[str, int], set[int]] = {}
+
+    def validate_after_transition(
+        vehicle: Vehicle, prior_edge: str, target_edge: str, target_lane: int
+    ) -> None:
+        slot = (target_edge, target_lane)
+        current_lane_ids = [
+            item for item in lanes[target_edge][target_lane]
+            if vehicles[item].edge_id == target_edge and vehicles[item].lane == target_lane
+        ]
+        current_lane_ids.extend(transitioned_by_lane.get(slot, ()))
+        current_lane_ids.append(vehicle.id)
+        lane_ids = sorted(
+            set(current_lane_ids), key=lambda item: (vehicles[item].s, item)
+        )
+        violations = check_no_overlap(
+            vehicles,
+            {
+                target_edge: [
+                    lane_ids if index == target_lane else []
+                    for index in range(edges[target_edge]["lanes"])
+                ]
+            },
+        )
+        if violations:
+            details = [
+                (v.follower_id, v.leader_id, v.overlap_m)
+                for v in violations
+            ]
+            raise RuntimeError(
+                f"overlap immediately after transition at t={time_s:.3f}s "
+                f"from {prior_edge} for vehicle {vehicle.id}: {details}"
+            )
+        transitioned_by_lane.setdefault(slot, set()).add(vehicle.id)
+
     def finish_rear_clear(vehicle: Vehicle, next_edge_id: str, s_new: float, v_new: float) -> None:
         current_edge_length = edges[vehicle.edge_id]["length"]
+        prior_edge = vehicle.edge_id
         next_lane = connections[(vehicle.edge_id, next_edge_id)][vehicle.lane]
         if s_new - vehicle.length >= current_edge_length:
             vehicle.edge_id = next_edge_id
             vehicle.lane = next_lane
             vehicle.s = s_new - current_edge_length
+            vehicle.v = v_new
+            validate_after_transition(vehicle, prior_edge, next_edge_id, next_lane)
         else:
             vehicle.s = s_new
-        vehicle.v = v_new
+            vehicle.v = v_new
 
-    def admission_allowed(vehicle: Vehicle, next_edge_id: str, next_lane: int, s_new: float) -> bool:
+    entry_velocity_by_id: dict[int, float] = {}
+
+    def entry_velocity(vehicle: Vehicle, next_edge_id: str, next_lane: int, s_new: float) -> float | None:
         edge = edges[vehicle.edge_id]
         type_config = vehicle_types[vehicle_type_ids[vehicle.id]]
         overflow = s_new - edge["length"]
-        available = entry_head_gap(next_edge_id, next_lane, reservations)
-        signal_open = signal_open_by_edge[vehicle.edge_id]
-        return overflow + type_config["s0_m"] <= available and signal_open
+        available_rear, leader_speed = entry_head_gap(next_edge_id, next_lane, reservations)
+        v_new = candidate_values[vehicle.id][0]
+        gap_above_s0 = available_rear - overflow - type_config["s0_m"]
+        if gap_above_s0 < 0.0:
+            return None
+        safe_closing_speed = math.sqrt(2.0 * 8.0 * gap_above_s0)
+        v_entry = min(v_new, leader_speed + safe_closing_speed)
+        if v_entry <= 0.0:
+            return None
+        signal_phase = signal_phase_by_edge[vehicle.edge_id]
+        signal_node = signal_node_by_edge[vehicle.edge_id]
+        committed = (
+            signal_node is not None
+            and active_signal_commitments.get(vehicle.id) == signal_node
+        )
+        signal_open = (
+            signal_phase == "green"
+            or committed
+            or (
+                signal_phase == "yellow"
+                and vehicle.v ** 2 / (2.0 * COMFORTABLE_BRAKING_MPS2)
+                > edge["length"] - vehicle.s
+            )
+        )
+        if overflow + type_config["s0_m"] > available_rear or not signal_open:
+            return None
+        return v_entry
+
+    def admission_allowed(vehicle: Vehicle, next_edge_id: str, next_lane: int, s_new: float) -> bool:
+        speed = entry_velocity(vehicle, next_edge_id, next_lane, s_new)
+        if speed is None:
+            return False
+        entry_velocity_by_id[vehicle.id] = speed
+        return True
 
     def admit(vehicle_id: int) -> None:
         vehicle = vehicles[vehicle_id]
         edge = edges[vehicle.edge_id]
-        v_new, s_new, next_edge_id, next_lane = candidate_values[vehicle_id]
+        _candidate_v, _candidate_s, next_edge_id, next_lane = candidate_values[vehicle_id]
+        v_new = entry_velocity_by_id[vehicle_id]
+        # The capped velocity is the symplectic-Euler velocity for this step;
+        # position must use it too or the run's distance conservation breaks.
+        s_new = vehicle.s + v_new * dt
         overflow = s_new - edge["length"]
         if use_reservations:
-            reservations[(next_edge_id, next_lane, vehicle_id)] = (overflow, vehicle.length)
+            reservations[(next_edge_id, next_lane, vehicle_id)] = (overflow, vehicle.length, v_new)
         finish_rear_clear(vehicle, next_edge_id, s_new, v_new)
 
     def hold_at_stop_line(vehicle_id: int) -> None:
@@ -223,8 +356,37 @@ def step_network(
         next_edge_id = route_next(vehicle)
         v_new, s_new = pending[vehicle_id]
         if vehicle.s > edge["length"] and next_edge_id is not None:
+            next_lane = connections[(vehicle.edge_id, next_edge_id)][vehicle.lane]
+            if next_lane is not None:
+                available_rear, leader_speed = entry_head_gap(
+                    next_edge_id, next_lane, reservations, ignore_vehicle_id=vehicle_id
+                )
+                type_config = vehicle_types[vehicle_type_ids[vehicle_id]]
+                gap_now = max(
+                    0.0,
+                    available_rear
+                    - (vehicle.s - edge["length"])
+                    - type_config["s0_m"],
+                )
+                # Reserve a braking distance after this step's travel. Solve
+                # q²/(2B) + q*dt <= gap for relative speed q (B = 8 m/s²).
+                brake = 8.0
+                closing_speed = max(
+                    0.0,
+                    -brake * dt
+                    + math.sqrt((brake * dt) ** 2 + 2.0 * brake * gap_now),
+                )
+                v_new = min(v_new, leader_speed + closing_speed)
+                s_new = max(vehicle.s, vehicle.s + v_new * dt)
             finish_rear_clear(vehicle, next_edge_id, s_new, v_new)
         elif s_new <= edge["length"] or next_edge_id is None:
+            if entry_blocked_by_id.get(vehicle_id, False):
+                type_config = vehicle_types[vehicle_type_ids[vehicle_id]]
+                s_new = min(
+                    s_new,
+                    max(vehicle.s, edge["length"] - type_config["s0_m"]),
+                )
+                v_new = (s_new - vehicle.s) / dt if dt > 0.0 else 0.0
             vehicle.s = max(vehicle.s, s_new)
             vehicle.v = v_new
         else:
@@ -279,6 +441,14 @@ def step_network(
     }
     for vehicle in vehicles.values():
         rebuilt[vehicle.edge_id][vehicle.lane].append(vehicle.id)
+    for vehicle_id, node_id in list(active_signal_commitments.items()):
+        vehicle = vehicles.get(vehicle_id)
+        if (
+            vehicle is None
+            or edges[vehicle.edge_id].get("to_node") != node_id
+            or vehicle.s > edges[vehicle.edge_id]["length"]
+        ):
+            active_signal_commitments.pop(vehicle_id, None)
     for edge_lanes in rebuilt.values():
         for lane_ids in edge_lanes:
             lane_ids.sort(key=lambda item: (vehicles[item].s, item))

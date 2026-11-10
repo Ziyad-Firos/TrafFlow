@@ -236,17 +236,19 @@ def attempt_due_spawns(
         edge = edges[edge_id]
         vehicle_type = vehicle_types[request.vehicle_type]
         origin_lanes = lanes[edge_id]
-        eligible: list[tuple[int, int]] = []
+        eligible: list[tuple[int, int, float]] = []
         for lane_index, lane_ids in enumerate(origin_lanes):
             if not lane_ids:
-                eligible.append((0, lane_index))
+                eligible.append((0, lane_index, float(vehicle_type["v0_mps"])))
                 continue
             # Engine lanes are maintained in ascending (s, id) order, so the
             # first vehicle is the nearest insertion blocker.
             nearest = vehicles[lane_ids[0]]
-            required_front_distance = nearest.length + float(vehicle_type["s0_m"])
-            if nearest.s >= required_front_distance:
-                eligible.append((len(lane_ids), lane_index))
+            spawn_speed = min(float(vehicle_type["v0_mps"]), nearest.v)
+            bumper_gap = nearest.s - nearest.length
+            required_gap = float(vehicle_type["s0_m"]) + spawn_speed * float(vehicle_type["T_s"])
+            if bumper_gap >= required_gap:
+                eligible.append((len(lane_ids), lane_index, spawn_speed))
 
         if not eligible:
             request_key = (request.demand_index, request.arrival_index)
@@ -257,7 +259,7 @@ def attempt_due_spawns(
             still_pending.append(request)
             continue
 
-        _occupancy, lane_index = min(eligible)
+        _occupancy, lane_index, spawn_speed = min(eligible, key=lambda choice: (choice[0], choice[1]))
         vehicle_id = state.next_vehicle_id
         while vehicle_id in vehicles:
             vehicle_id += 1
@@ -267,7 +269,7 @@ def attempt_due_spawns(
             edge_id=edge_id,
             lane=lane_index,
             s=0.0,
-            v=float(vehicle_type["v0_mps"]),
+            v=spawn_speed,
             length=float(vehicle_type["length_m"]),
             route=list(request.route),
         )

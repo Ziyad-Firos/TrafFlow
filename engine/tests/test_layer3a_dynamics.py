@@ -44,10 +44,10 @@ def test_idm_without_leader_brakes_when_vehicle_exceeds_speed_limit():
     assert acceleration == pytest.approx(-0.534, abs=1e-3)
 
 
-def test_idm_fast_closing_leader_produces_strong_negative_acceleration():
+def test_idm_fast_closing_leader_acceleration_is_limited_by_physical_brake_cap():
     acceleration = idm_acceleration(13.9, 5.0, 15.5, **PARAMS)
 
-    assert acceleration == pytest.approx(-21.4, abs=0.05)
+    assert acceleration == pytest.approx(-8.0, abs=1e-12)
 
 
 def test_symplectic_euler_accelerates_from_rest_using_new_speed_for_position():

@@ -110,3 +110,94 @@ def test_blocked_downstream_holds_vehicle_without_moving_it_backward():
     assert incoming.s >= 99.5
     assert incoming.v == 0.0
     assert check_no_overlap(vehicles, lanes) == []
+
+
+def _velocity_entry_setup(*, merge: bool = False):
+    network = _network()
+    network["edges"][1]["speed_limit"] = 1.5
+    if not merge:
+        network["edges"][0]["lanes"] = 1
+        network["connections"][0]["lanes"] = [0]
+    incoming = _vehicle(1, lane=0, s=99.5)
+    downstream = Vehicle(
+        id=2,
+        edge_id="edge_B",
+        lane=0,
+        s=11.74,
+        v=1.5,
+        length=4.5,
+        route=["edge_B"],
+    )
+    if merge:
+        vehicles = {
+            1: incoming,
+            2: _vehicle(2, lane=1, s=99.5),
+            3: downstream,
+        }
+        lanes = {"edge_A": [[1], [2]], "edge_B": [[3]]}
+        type_ids = {1: "car", 2: "car", 3: "car"}
+    else:
+        vehicles = {1: incoming, 2: downstream}
+        lanes = {"edge_A": [[1], []], "edge_B": [[2]]}
+        type_ids = {1: "car", 2: "car"}
+    return network, vehicles, lanes, type_ids
+
+
+def test_t_vel_1_single_approach_caps_speed_on_entry_without_overlap():
+    network, vehicles, lanes, type_ids = _velocity_entry_setup()
+    incoming = vehicles[1]
+
+    step_network(vehicles, lanes, network, type_ids, _vehicle_types(), dt=0.1)
+
+    # Leader rear=7.39m; incoming overflow=0.89m, so bumper gap=6.5m.
+    # Gap above s0 is 4.5m; v_safe=sqrt(2*8*4.5)=8.485m/s, hence
+    # v_entry=min(13.9,1.5+8.485)=9.985m/s. Symplectic position uses that
+    # capped speed, so s=99.5+9.985*0.1=100.4985m. Attribution remains.
+    assert incoming.edge_id == "edge_A"
+    assert incoming.s == pytest.approx(100.4985, abs=1e-3)
+    assert incoming.v == pytest.approx(9.985, abs=0.1)
+    assert check_no_overlap(vehicles, lanes) == []
+
+
+def test_t_vel_2_uncapped_entry_collides_but_capped_transition_stays_clear():
+    # Recreate the state immediately after an uncapped transition.
+    network = {
+        "edges": [{"id": "edge_B", "length": 100.0, "lanes": 1, "speed_limit": 13.9}],
+        "connections": [],
+    }
+    follower = Vehicle(1, "edge_B", 0, 0.89, 13.9, 4.5, ["edge_B"])
+    leader = Vehicle(2, "edge_B", 0, 11.89, 1.5, 4.5, ["edge_B"])
+    vehicles = {1: follower, 2: leader}
+    lanes = {"edge_B": [[1, 2]]}
+    type_ids = {1: "car", 2: "car"}
+    first_overlap_step = None
+    for step in range(10):
+        step_network(vehicles, lanes, network, type_ids, _vehicle_types(), dt=0.1)
+        # Hold the low-speed leader at its original speed/position to isolate
+        # the unsafe uncapped relative braking case.
+        leader.s, leader.v = 11.89, 1.5
+        violations = check_no_overlap(vehicles, lanes)
+        if violations:
+            first_overlap_step = step + 1
+            break
+    # Discrete 0.1 s integration first crosses the 6.5m gap on step 6.
+    assert first_overlap_step == 6
+
+    network, vehicles, lanes, type_ids = _velocity_entry_setup()
+    for _ in range(20):
+        step_network(vehicles, lanes, network, type_ids, _vehicle_types(), dt=0.1)
+        assert check_no_overlap(vehicles, lanes) == []
+
+
+def test_t_vel_3_merge_admits_one_velocity_capped_vehicle_and_reserves_slot():
+    network, vehicles, lanes, type_ids = _velocity_entry_setup(merge=True)
+    first, second = vehicles[1], vehicles[2]
+
+    step_network(vehicles, lanes, network, type_ids, _vehicle_types(), dt=0.1)
+
+    assert first.v == pytest.approx(9.985, abs=0.1)
+    assert first.s == pytest.approx(100.4985, abs=1e-3)
+    assert second.edge_id == "edge_A"
+    assert second.s == 99.5
+    assert check_no_overlap(vehicles, lanes) == []
+    assert check_no_overlap(vehicles, lanes) == []

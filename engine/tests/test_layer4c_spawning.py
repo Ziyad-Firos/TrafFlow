@@ -168,7 +168,8 @@ def test_r6_demo_demand_seventy_five_preset_spawns_fit_the_origin_envelope():
     assert state.delayed_spawns == 0
     assert all(vehicle.route[0] == "a_w_d1" for vehicle in vehicles.values())
     assert all(vehicle.lane in (0, 1, 2) for vehicle in vehicles.values())
-    assert all(record.speed_mps == 13.9 for record in records)
+    assert all(0.0 <= record.speed_mps <= 13.9 for record in records)
+    assert any(record.speed_mps < 13.9 for record in records)
     assert {tuple(vehicle.route) for vehicle in vehicles.values()} == {
         route_options["through"], route_options["flyover"]
     }
@@ -203,3 +204,62 @@ def test_r7_vehicle_starts_at_v0_and_keeps_speed_on_first_free_flow_step():
     assert vehicle.v == 13.9
     step_network(vehicles, lanes, network, {1: "car"}, scenario["vehicle_types"], dt=0.1, signals={})
     assert vehicle.v == 13.9
+
+
+def test_r8_spawn_speed_tracks_leader_and_uses_idm_time_headway():
+    network = _small_network(lanes=1)
+    scenario = _scenario(rate=3600.0, duration=1.0)
+    leader = Vehicle(99, "edge", 0, 40.0, 8.0, 4.5, ["edge"])
+    vehicles = {99: leader}
+    lanes = {"edge": [[99]]}
+    state = SpawnState(schedule=[SpawnRequest(0.0, ("edge",), "car", "W", 0, 0)])
+
+    records = attempt_due_spawns(0.0, state, vehicles, lanes, network, scenario)
+
+    # The leader's rear is at 35.5m, comfortably beyond s0+8*1.5=14m.
+    assert len(records) == 1
+    assert vehicles[1].v == 8.0
+    assert vehicles[1].s == 0.0
+
+
+def test_r9_spawn_waits_for_idm_headway_then_retries_successfully():
+    network = _small_network(lanes=1)
+    scenario = _scenario(rate=3600.0, duration=1.0)
+    leader = Vehicle(99, "edge", 0, 20.0, 13.9, 4.5, ["edge"])
+    vehicles = {99: leader}
+    lanes = {"edge": [[99]]}
+    state = SpawnState(schedule=[SpawnRequest(0.0, ("edge",), "car", "W", 0, 0)])
+
+    assert attempt_due_spawns(0.0, state, vehicles, lanes, network, scenario) == []
+    assert state.successful_spawns == 0
+    assert len(state.pending) == 1
+    # At s=28m the leader's rear is 23.5m >= s0+v0*T=22.85m.
+    leader.s = 28.0
+    records = attempt_due_spawns(0.1, state, vehicles, lanes, network, scenario)
+
+    assert len(records) == 1
+    assert state.successful_spawns == 1
+    assert state.delayed_spawns == 1
+    assert vehicles[1].v == 13.9
+
+
+def test_r10_pending_spawn_on_full_edge_does_not_block_later_free_edge_request():
+    network = _small_network(lanes=1)
+    network["edges"].append({
+        "id": "free_edge", "from_node": "W", "to_node": "E", "length": 10000.0,
+        "lanes": 1, "speed_limit": 13.9, "polyline": [[0.0, 0.0], [10000.0, 0.0]],
+        "type": "road",
+    })
+    scenario = _scenario(rate=3600.0, duration=1.0)
+    vehicles = {99: Vehicle(99, "edge", 0, 0.0, 0.0, 4.5, ["edge"])}
+    lanes = {"edge": [[99]], "free_edge": [[]]}
+    state = SpawnState(schedule=[
+        SpawnRequest(0.0, ("edge",), "car", "W", 0, 0),
+        SpawnRequest(0.0, ("free_edge",), "car", "W", 1, 0),
+    ])
+
+    records = attempt_due_spawns(0.0, state, vehicles, lanes, network, scenario)
+
+    assert [record.route[0] for record in records] == ["free_edge"]
+    assert state.successful_spawns == 1
+    assert [request.route[0] for request in state.pending] == ["edge"]

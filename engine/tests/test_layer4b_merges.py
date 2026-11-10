@@ -84,9 +84,9 @@ def _same_edge_network():
 def _run_m7():
     vehicles = {
         1: Vehicle(1, "in", 0, 99.5, 13.9, 4.5, ["in", "out"]),
-        2: Vehicle(2, "in", 0, 93.0, 13.9, 4.5, ["in", "out"]),
+        2: Vehicle(2, "in", 0, 75.0, 13.9, 4.5, ["in", "out"]),
         3: Vehicle(3, "in", 1, 99.5, 13.9, 4.5, ["in", "out"]),
-        4: Vehicle(4, "in", 1, 93.0, 13.9, 4.5, ["in", "out"]),
+        4: Vehicle(4, "in", 1, 75.0, 13.9, 4.5, ["in", "out"]),
     }
     lanes = {"in": [[2, 1], [4, 3]], "out": [[]]}
     merge_state = {}

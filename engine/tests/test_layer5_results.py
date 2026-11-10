@@ -145,9 +145,9 @@ def test_five_minute_columnar_payload_gzip_is_measured_below_two_megabytes():
     compressed_size = len(gzip.compress(payload, compresslevel=9))
 
     assert result.requested_count == 369
-    assert result.spawned_count == 300
-    assert len(result.frames["id"]) == 92981
+    assert result.spawned_count == 367
+    assert len(result.frames["id"]) == 105453
     assert len(frame_counts) == 598
-    assert max(frame_counts.values()) == 274
-    assert compressed_size == 859186
+    assert max(frame_counts.values()) == 331
+    assert compressed_size == 986962
     assert compressed_size < 2_000_000

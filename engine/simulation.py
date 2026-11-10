@@ -11,7 +11,6 @@ from engine.invariants import check_no_overlap
 from engine.metrics import RunMetrics
 from engine.movement import step_network
 from engine.recording import FrameColumns, FrameRecorder
-from engine.scenario import signal_phase_at
 from engine.spawning import SpawnRecord, SpawnState, generate_spawn_schedule, attempt_due_spawns
 from engine.state import LanesByEdge, Vehicle
 from engine.version import ENGINE_VERSION
@@ -42,6 +41,7 @@ class SimulationResult:
     requested_flyover_count: int
     spawned_count: int
     spawned_flyover_count: int
+    active_before_j1_count: int
     pending_count: int
     completed_count: int
     active_count: int
@@ -51,6 +51,7 @@ class SimulationResult:
     trip_records: tuple[TripRecord, ...]
     frames: FrameColumns
     j1_discharge_count: int
+    j1_crossing_times_s: tuple[float, ...]
     overlap_checks: int
     overlap_violations: int
     cumulative_distance_m: float
@@ -71,6 +72,29 @@ class SimulationResult:
     def steps_per_second(self) -> float:
         return self.steps / self.elapsed_s if self.elapsed_s > 0.0 else 0.0
 
+    @property
+    def conservation_error_count(self) -> int:
+        return abs(
+            self.spawned_count
+            - self.j1_discharge_count
+            - self.spawned_flyover_count
+            - self.active_before_j1_count
+        )
+
+    @property
+    def requested_by_route(self) -> dict[str, int]:
+        return {
+            "through": self.requested_count - self.requested_flyover_count,
+            "flyover": self.requested_flyover_count,
+        }
+
+    @property
+    def spawned_by_route(self) -> dict[str, int]:
+        return {
+            "through": self.spawned_count - self.spawned_flyover_count,
+            "flyover": self.spawned_flyover_count,
+        }
+
     def summary_bytes(self) -> bytes:
         """Return deterministic summary bytes; wall-clock runtime is excluded."""
         summary = {
@@ -81,12 +105,27 @@ class SimulationResult:
             "requested_flyover_count": self.requested_flyover_count,
             "spawned_count": self.spawned_count,
             "spawned_flyover_count": self.spawned_flyover_count,
+            "active_before_j1_count": self.active_before_j1_count,
             "pending_count": self.pending_count,
             "completed_count": self.completed_count,
             "active_count": self.active_count,
             "delayed_spawns": self.delayed_spawns,
             "delayed_attempts": self.delayed_attempts,
             "j1_discharge_count": self.j1_discharge_count,
+            "measurement_window": {
+                "start_time_s": 0.0,
+                "end_time_s": round(self.duration_s, 6),
+                "duration_s": round(self.duration_s, 6),
+            },
+            "requested_by_route": self.requested_by_route,
+            "spawned_by_route": self.spawned_by_route,
+            "conservation": {
+                "spawned": self.spawned_count,
+                "j1_crossings": self.j1_discharge_count,
+                "flyover_users": self.spawned_flyover_count,
+                "active_on_network": self.active_before_j1_count,
+                "unaccounted": self.conservation_error_count,
+            },
             "overlap_checks": self.overlap_checks,
             "overlap_violations": self.overlap_violations,
             "cumulative_distance_m": round(self.cumulative_distance_m, 6),
@@ -147,7 +186,10 @@ def run_simulation(
     vehicle_type_ids: dict[int, str] = {}
     departure_by_id: dict[int, float] = {}
     merge_state: dict[tuple[str, int], tuple[str, int]] = {}
+    signal_commitments: dict[int, str] = {}
     trips: list[TripRecord] = []
+    j1_crossed_ids: set[int] = set()
+    j1_crossing_times_s: list[float] = []
     metrics = RunMetrics()
     frame_recorder = FrameRecorder(
         dt_s=dt_s,
@@ -193,12 +235,9 @@ def run_simulation(
             merge_state=merge_state,
             time_s=now_s,
             signals=signal_configs,
+            signal_commitments=signal_commitments,
         )
 
-        phase_open = (
-            j1_signal is not None
-            and signal_phase_at(j1_signal, now_s) == "green"
-        )
         step_distance_m = 0.0
         step_speed_integral_m = 0.0
         step_j1_crossings = 0
@@ -207,11 +246,12 @@ def run_simulation(
             old_edge = edges[old_edge_id]
             new_edge_id, new_s = vehicle.edge_id, vehicle.s
             if (
-                phase_open
-                and old_edge_id in controlled_j1_edges
+                old_edge_id in controlled_j1_edges
                 and old_s <= old_edge["length"] < new_s
             ):
                 step_j1_crossings += 1
+                j1_crossed_ids.add(vehicle_id)
+                j1_crossing_times_s.append(round(now_s + dt_s, 10))
 
             if new_edge_id == old_edge_id:
                 step_distance_m += new_s - old_s
@@ -228,7 +268,26 @@ def run_simulation(
             overlap_violations=len(violations),
         )
         if violations:
-            raise AssertionError(f"no-overlap invariant failed at t={now_s + dt_s:.1f}: {violations!r}")
+            involved_ids = {
+                vehicle_id
+                for violation in violations
+                for vehicle_id in (violation.follower_id, violation.leader_id)
+            }
+            details = {
+                vehicle_id: {
+                    "edge_id": vehicles[vehicle_id].edge_id,
+                    "lane": vehicles[vehicle_id].lane,
+                    "s": vehicles[vehicle_id].s,
+                    "v": vehicles[vehicle_id].v,
+                    "length": vehicles[vehicle_id].length,
+                    "route": vehicles[vehicle_id].route,
+                }
+                for vehicle_id in sorted(involved_ids)
+            }
+            raise AssertionError(
+                f"no-overlap invariant failed at t={now_s + dt_s:.1f}: "
+                f"{violations!r}; vehicles={details!r}"
+            )
 
         finished = [
             vehicle_id for vehicle_id, vehicle in vehicles.items()
@@ -268,6 +327,13 @@ def run_simulation(
         raise AssertionError(f"no-overlap invariant failed at t={duration_s:.1f}: {final_violations!r}")
 
     elapsed_s = time.perf_counter() - started
+    active_before_j1_count = sum(
+        1
+        for vehicle in vehicles.values()
+        if "f_e" not in vehicle.route
+        and "a_d1_j1" in vehicle.route
+        and vehicle.id not in j1_crossed_ids
+    )
     return SimulationResult(
         engine_version=ENGINE_VERSION,
         seed=int(scenario["seed"]),
@@ -278,6 +344,7 @@ def run_simulation(
         requested_flyover_count=sum("f_e" in request.route for request in schedule),
         spawned_count=spawn_state.successful_spawns,
         spawned_flyover_count=sum("f_e" in record.route for record in spawn_state.records),
+        active_before_j1_count=active_before_j1_count,
         pending_count=len(spawn_state.pending),
         completed_count=len(trips),
         active_count=len(vehicles),
@@ -287,6 +354,7 @@ def run_simulation(
         trip_records=tuple(sorted(trips, key=lambda trip: trip.vehicle_id)),
         frames=frame_recorder.frames,
         j1_discharge_count=metrics.j1_discharge_count,
+        j1_crossing_times_s=tuple(j1_crossing_times_s),
         overlap_checks=metrics.overlap_checks,
         overlap_violations=metrics.overlap_violations,
         cumulative_distance_m=metrics.cumulative_distance_m,

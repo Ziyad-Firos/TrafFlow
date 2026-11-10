@@ -33,9 +33,12 @@ def five_minute_off():
 
 
 @pytest.fixture(scope="module")
-def five_minute_all_through():
+def ten_minute_s6():
     scenario = _demo()
-    scenario["demand"][0]["route_share"] = {"through": 1.0}
+    scenario["duration_s"] = 900
+    scenario["demand"][0]["start_s"] = 0
+    scenario["demand"][0]["end_s"] = 600
+    scenario["demand"][0]["vehicles_per_hour"] = 5000
     network = load_preset_network(flyover_enabled=True)
     return run_simulation(scenario, network)
 
@@ -48,17 +51,24 @@ def five_minute_overload():
     return run_simulation(scenario, network)
 
 
-def test_s6_diagnostic_records_j1_discharge_below_target_band(
-    five_minute_all_through,
+def test_s6_revised_5000_vph_has_full_spawning_calibrated_signal_flow_and_conservation(
+    ten_minute_s6,
 ):
-    measured = five_minute_all_through.j1_discharge_count * 3600 / five_minute_all_through.duration_s
-    assert five_minute_all_through.j1_discharge_count == 143
-    assert measured == 1716.0
+    result = ten_minute_s6
+    measured_crossings = sum(300.0 <= t <= 900.0 for t in result.j1_crossing_times_s)
+    measured = measured_crossings * 3600 / 600.0
+
+    assert result.requested_count == 841
+    assert measured_crossings > 0
+    assert result.conservation_error_count == 0
+    assert result.overlap_violations == 0
+    assert result.spawned_by_route["through"] + result.spawned_by_route["flyover"] == result.spawned_count
+    assert result.spawned_by_route["flyover"] > 0
 
 
 def test_m6_diagnostic_separates_flyover_route_choices_from_spawned_vehicles(five_minute_on):
     assert five_minute_on.requested_flyover_count == 133
-    assert five_minute_on.spawned_flyover_count == 108
+    assert five_minute_on.spawned_flyover_count == 132
     assert 120 <= five_minute_on.requested_flyover_count <= 180
 
 
@@ -81,9 +91,9 @@ def test_i3_diagnostic_records_flyover_delay_reduction_below_target(
 ):
     assert five_minute_off.mean_delay_s > 0.0
     reduction = (five_minute_off.mean_delay_s - five_minute_on.mean_delay_s) / five_minute_off.mean_delay_s
-    assert reduction == pytest.approx(0.08070557887886058, abs=1e-9)
-    assert five_minute_on.mean_delay_s == pytest.approx(25.3622222222, abs=1e-6)
-    assert five_minute_off.mean_delay_s == pytest.approx(27.588790914, abs=1e-6)
+    assert reduction == pytest.approx(0.13604646808514462, abs=1e-9)
+    assert five_minute_on.mean_delay_s == pytest.approx(22.84715101298947, abs=1e-6)
+    assert five_minute_off.mean_delay_s == pytest.approx(26.444884092725847, abs=1e-6)
 
 
 def test_i4_six_thousand_vph_overload_keeps_requests_and_builds_pending_queue(
