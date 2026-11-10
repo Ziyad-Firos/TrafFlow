@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "network_id": "iisc_two_junctions_v1",
+  "network_options": {"flyover_enabled": true},
+  "duration_s": 300,
+  "dt_s": 0.1,
+  "record_interval_s": 0.5,
+  "seed": 20261110,
+  "demand": [
+    {
+      "origin_node": "W",
+      "destination_node": "E",
+      "vehicles_per_hour": 4500,
+      "start_s": 0,
+      "end_s": 300,
+      "vehicle_type": "car",
+      "route_share": {"through": 0.6, "flyover": 0.4}
+    }
+  ],
+  "signals": [
+    {"node_id":"J1","cycle_s":80,"green_s":54,"yellow_s":2,"red_s":24,"offset_s":0},
+    {"node_id":"J2","cycle_s":80,"green_s":54,"yellow_s":2,"red_s":24,"offset_s":20}
+  ],
+  "vehicle_types": {
+    "car": {"length_m":4.5,"v0_mps":13.9,"A_mps2":1.5,"B_mps2":2,"T_s":1.5,"s0_m":2}
+  },
+  "events": []
+}
