@@ -32,6 +32,9 @@ class SpawnRecord:
     route: tuple[str, ...]
     lane: int
     speed_mps: float
+    vehicle_type: str
+    demand_index: int
+    arrival_index: int
 
 
 @dataclass(slots=True)
@@ -238,7 +241,9 @@ def attempt_due_spawns(
             if not lane_ids:
                 eligible.append((0, lane_index))
                 continue
-            nearest = min((vehicles[vehicle_id] for vehicle_id in lane_ids), key=lambda vehicle: (vehicle.s, vehicle.id))
+            # Engine lanes are maintained in ascending (s, id) order, so the
+            # first vehicle is the nearest insertion blocker.
+            nearest = vehicles[lane_ids[0]]
             required_front_distance = nearest.length + float(vehicle_type["s0_m"])
             if nearest.s >= required_front_distance:
                 eligible.append((len(lane_ids), lane_index))
@@ -276,6 +281,9 @@ def attempt_due_spawns(
             route=request.route,
             lane=lane_index,
             speed_mps=vehicle.v,
+            vehicle_type=request.vehicle_type,
+            demand_index=request.demand_index,
+            arrival_index=request.arrival_index,
         )
         new_records.append(record)
         state.records.append(record)

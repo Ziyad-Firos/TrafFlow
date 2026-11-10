@@ -75,7 +75,7 @@ def step_network(
         route_index = vehicle.route.index(vehicle.edge_id)
         return vehicle.route[route_index + 1] if route_index + 1 < len(vehicle.route) else None
 
-    start_of_step_straddlers: list[tuple[str, int, float]] = []
+    start_of_step_straddler_rears: dict[tuple[str, int], list[float]] = {}
     for existing in vehicles.values():
         current_edge = edges[existing.edge_id]
         next_edge_id = route_next(existing)
@@ -83,8 +83,9 @@ def step_network(
             mapped_lane = connections[(existing.edge_id, next_edge_id)][existing.lane]
             if mapped_lane is not None:
                 front_on_next = existing.s - current_edge["length"]
-                start_of_step_straddlers.append(
-                    (next_edge_id, mapped_lane, front_on_next - existing.length)
+                slot = (next_edge_id, mapped_lane)
+                start_of_step_straddler_rears.setdefault(slot, []).append(
+                    front_on_next - existing.length
                 )
 
     def entry_head_gap(
@@ -99,9 +100,7 @@ def step_network(
             rear_positions.append(first.s - first.length)
         # Use only the start-of-step snapshot here. Vehicles admitted earlier
         # this step are accounted for solely by explicit reservations.
-        for straddler_edge, straddler_lane, straddler_rear in start_of_step_straddlers:
-            if straddler_edge == next_edge_id and straddler_lane == next_lane:
-                rear_positions.append(straddler_rear)
+        rear_positions.extend(start_of_step_straddler_rears.get((next_edge_id, next_lane), ()))
         if use_reservations:
             for (reserved_edge, reserved_lane, _), (position_front, length) in reservations.items():
                 if reserved_edge == next_edge_id and reserved_lane == next_lane:
