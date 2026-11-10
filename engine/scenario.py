@@ -67,6 +67,18 @@ def validate_scenario(scenario: dict[str, Any], network: dict[str, Any]) -> list
             errors.append(f"signals[{index}] cycle_s must equal green_s + yellow_s + red_s")
         if _finite_number(signal.get("yellow_s")) and signal["yellow_s"] != 2.0:
             errors.append(f"signals[{index}].yellow_s must be 2.0 seconds in schema version 1.0")
+        controlled_edges = signal.get("controlled_edges")
+        if controlled_edges is not None:
+            if not isinstance(controlled_edges, list) or not controlled_edges:
+                errors.append(f"signals[{index}].controlled_edges must be a non-empty array")
+            else:
+                incoming_edges = {
+                    edge["id"]
+                    for edge in network["edges"]
+                    if edge["to_node"] == node_id
+                }
+                if not all(isinstance(edge_id, str) and edge_id in incoming_edges for edge_id in controlled_edges):
+                    errors.append(f"signals[{index}].controlled_edges must reference incoming edges at node {node_id}")
     return errors
 
 

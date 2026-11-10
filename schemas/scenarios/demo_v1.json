@@ -18,8 +18,8 @@
     }
   ],
   "signals": [
-    {"node_id":"J1","cycle_s":80,"green_s":54,"yellow_s":2,"red_s":24,"offset_s":0},
-    {"node_id":"J2","cycle_s":80,"green_s":54,"yellow_s":2,"red_s":24,"offset_s":20}
+    {"node_id":"J1","cycle_s":80,"green_s":54,"yellow_s":2,"red_s":24,"offset_s":0,"controlled_edges":["a_d1_j1","a_d2_j1"]},
+    {"node_id":"J2","cycle_s":80,"green_s":54,"yellow_s":2,"red_s":24,"offset_s":20,"controlled_edges":["a_d2_j2","a_e_j2"]}
   ],
   "vehicle_types": {
     "car": {"length_m":4.5,"v0_mps":13.9,"A_mps2":1.5,"B_mps2":2,"T_s":1.5,"s0_m":2}

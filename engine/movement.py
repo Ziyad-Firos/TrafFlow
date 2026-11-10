@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from engine.dynamics import idm_acceleration, symplectic_euler_step
+from engine.scenario import signal_phase_at
 from engine.state import LanesByEdge, Vehicle
 
 
@@ -16,6 +17,8 @@ def step_network(
     *,
     dt: float,
     use_reservations: bool = True,
+    time_s: float = 0.0,
+    signals: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     """Advance one snapshot step, resolving transitions in ascending vehicle ID order."""
     edges = {edge["id"]: edge for edge in network["edges"]}
@@ -23,6 +26,28 @@ def step_network(
         (connection["from_edge"], connection["to_edge"]): connection["lanes"]
         for connection in network["connections"]
     }
+    nodes = {node["id"]: node for node in network.get("nodes", [])}
+    signal_configs = signals or {}
+
+    def signal_for_edge(edge_id: str) -> Mapping[str, Any] | None:
+        end_node = edges[edge_id].get("to_node")
+        if end_node is None or nodes.get(end_node, {}).get("type") != "signalized":
+            return None
+        signal = signal_configs.get(end_node)
+        if signal is None:
+            return None
+        controlled_edges = signal.get("controlled_edges")
+        if controlled_edges is not None and edge_id not in controlled_edges:
+            return None
+        return signal
+
+    def signal_open_at(signal: Mapping[str, Any], crossing_time: float) -> bool:
+        timing = {
+            key: float(signal[key])
+            for key in ("cycle_s", "green_s", "yellow_s", "red_s", "offset_s")
+            if key in signal
+        }
+        return signal_phase_at(timing, crossing_time) == "green"
 
     def route_next(vehicle: Vehicle) -> str | None:
         route_index = vehicle.route.index(vehicle.edge_id)
@@ -84,7 +109,30 @@ def step_network(
             next_lane = connections[(vehicle.edge_id, next_edge_id)][vehicle.lane]
             if next_lane is not None:
                 available = entry_head_gap(next_edge_id, next_lane, {})
-                if available < type_config["s0_m"] + vehicle.length:
+                entry_blocked = available < type_config["s0_m"] + vehicle.length
+
+                signal = signal_for_edge(vehicle.edge_id)
+                signal_blocked = False
+                if signal is not None:
+                    base_acceleration = idm_acceleration(
+                        v=vehicle.v,
+                        v_leader_or_none=leader_speed,
+                        gap=gap,
+                        v0=edge["speed_limit"],
+                        A=type_config["A_mps2"],
+                        B=type_config["B_mps2"],
+                        T=type_config["T_s"],
+                        s0=type_config["s0_m"],
+                    )
+                    projected_v = max(0.0, vehicle.v + base_acceleration * dt)
+                    projected_s = vehicle.s + projected_v * dt
+                    if projected_s > edge["length"] and projected_v > 0.0:
+                        crossing_time = time_s + (edge["length"] - vehicle.s) / projected_v
+                        signal_blocked = not signal_open_at(signal, crossing_time)
+                    else:
+                        signal_blocked = not signal_open_at(signal, time_s)
+
+                if entry_blocked or signal_blocked:
                     stop_gap = max(1e-9, edge["length"] - vehicle.s)
                     if leader is None or stop_gap < (gap if gap is not None else float("inf")):
                         leader_speed, gap = 0.0, stop_gap
@@ -143,7 +191,16 @@ def step_network(
                 if next_lane is not None
                 else float("-inf")
             )
-            if next_lane is not None and overflow + type_config["s0_m"] <= available:
+            signal = signal_for_edge(vehicle.edge_id)
+            signal_open = True
+            if signal is not None and v_new > 0.0:
+                crossing_time = time_s + (edge["length"] - vehicle.s) / v_new
+                signal_open = signal_open_at(signal, crossing_time)
+            if (
+                next_lane is not None
+                and overflow + type_config["s0_m"] <= available
+                and signal_open
+            ):
                 if use_reservations:
                     reservations[(next_edge_id, next_lane, vehicle_id)] = (overflow, vehicle.length)
                 vehicle.s = s_new

@@ -53,6 +53,7 @@ class Signal(TypedDict):
     yellow_s: float
     red_s: float
     offset_s: float
+    controlled_edges: NotRequired[list[str]]
 
 
 class Scenario(TypedDict):
