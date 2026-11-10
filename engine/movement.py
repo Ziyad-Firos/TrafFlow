@@ -71,6 +71,14 @@ def step_network(
         }
         return signal_phase_at(timing, time_s) == "green"
 
+    signal_open_by_edge = {
+        edge_id: (
+            signal is None or signal_open_at_step_start(signal)
+        )
+        for edge_id in edges
+        for signal in (signal_for_edge(edge_id),)
+    }
+
     def route_next(vehicle: Vehicle) -> str | None:
         route_index = vehicle.route.index(vehicle.edge_id)
         return vehicle.route[route_index + 1] if route_index + 1 < len(vehicle.route) else None
@@ -115,6 +123,7 @@ def step_network(
 
     # Snapshot accelerations. A full downstream entry acts as a virtual stop-line leader.
     accelerations: dict[int, float] = {}
+    snapshot_entry_gap_cache: dict[tuple[str, int], float] = {}
     for vehicle_id in sorted(vehicles):
         vehicle = vehicles[vehicle_id]
         edge = edges[vehicle.edge_id]
@@ -129,13 +138,13 @@ def step_network(
         if next_edge_id is not None and vehicle.s <= edge["length"]:
             next_lane = connections[(vehicle.edge_id, next_edge_id)][vehicle.lane]
             if next_lane is not None:
-                available = entry_head_gap(next_edge_id, next_lane, {})
+                slot = (next_edge_id, next_lane)
+                if slot not in snapshot_entry_gap_cache:
+                    snapshot_entry_gap_cache[slot] = entry_head_gap(next_edge_id, next_lane, {})
+                available = snapshot_entry_gap_cache[slot]
                 entry_blocked = available < type_config["s0_m"] + vehicle.length
 
-                signal = signal_for_edge(vehicle.edge_id)
-                signal_blocked = (
-                    signal is not None and not signal_open_at_step_start(signal)
-                )
+                signal_blocked = not signal_open_by_edge[vehicle.edge_id]
 
                 if entry_blocked or signal_blocked:
                     stop_gap = max(1e-9, edge["length"] - vehicle.s)
@@ -185,8 +194,7 @@ def step_network(
         type_config = vehicle_types[vehicle_type_ids[vehicle.id]]
         overflow = s_new - edge["length"]
         available = entry_head_gap(next_edge_id, next_lane, reservations)
-        signal = signal_for_edge(vehicle.edge_id)
-        signal_open = signal is None or signal_open_at_step_start(signal)
+        signal_open = signal_open_by_edge[vehicle.edge_id]
         return overflow + type_config["s0_m"] <= available and signal_open
 
     def admit(vehicle_id: int) -> None:

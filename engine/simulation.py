@@ -8,10 +8,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from engine.invariants import check_no_overlap
+from engine.metrics import RunMetrics
 from engine.movement import step_network
+from engine.recording import FrameColumns, FrameRecorder
 from engine.scenario import signal_phase_at
 from engine.spawning import SpawnRecord, SpawnState, generate_spawn_schedule, attempt_due_spawns
 from engine.state import LanesByEdge, Vehicle
+from engine.version import ENGINE_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +33,8 @@ class TripRecord:
 
 @dataclass(frozen=True, slots=True)
 class SimulationResult:
+    engine_version: str
+    seed: int
     duration_s: float
     dt_s: float
     steps: int
@@ -44,6 +49,7 @@ class SimulationResult:
     delayed_attempts: int
     spawn_records: tuple[SpawnRecord, ...]
     trip_records: tuple[TripRecord, ...]
+    frames: FrameColumns
     j1_discharge_count: int
     overlap_checks: int
     overlap_violations: int
@@ -98,6 +104,20 @@ class SimulationResult:
         }
         return json.dumps(summary, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
+    def to_json_bytes(self) -> bytes:
+        """Serialize the v1 result envelope with summary and columnar frames."""
+        payload = {
+            "schema_version": "1.0",
+            "engine_version": self.engine_version,
+            "seed": self.seed,
+            "frames_format": "json-v1",
+            "summary": json.loads(self.summary_bytes()),
+            "frames": self.frames,
+        }
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+
 
 def run_simulation(
     scenario: dict[str, Any],
@@ -128,10 +148,11 @@ def run_simulation(
     departure_by_id: dict[int, float] = {}
     merge_state: dict[tuple[str, int], tuple[str, int]] = {}
     trips: list[TripRecord] = []
-    j1_discharge_count = 0
-    overlap_checks = 0
-    cumulative_distance = 0.0
-    speed_integral = 0.0
+    metrics = RunMetrics()
+    frame_recorder = FrameRecorder(
+        dt_s=dt_s,
+        record_interval_s=float(scenario["record_interval_s"]),
+    )
 
     j1_signal = signal_configs.get("J1")
     controlled_j1_edges = set(j1_signal.get("controlled_edges", [])) if j1_signal else set()
@@ -149,6 +170,13 @@ def run_simulation(
         for record in spawned_now:
             vehicle_type_ids[record.vehicle_id] = record.vehicle_type
             departure_by_id[record.vehicle_id] = record.spawned_at_s
+
+        # Samples are taken at the start of due steps, including t=0. This
+        # yields t=0.0..duration-interval on an exact cadence, without a
+        # synthetic frame at the terminal time.
+        frame_recorder.record_if_due(
+            step_index=step_index, time_s=now_s, vehicles=vehicles
+        )
 
         before = {
             vehicle_id: (vehicle.edge_id, vehicle.s)
@@ -171,6 +199,9 @@ def run_simulation(
             j1_signal is not None
             and signal_phase_at(j1_signal, now_s) == "green"
         )
+        step_distance_m = 0.0
+        step_speed_integral_m = 0.0
+        step_j1_crossings = 0
         for vehicle_id, (old_edge_id, old_s) in before.items():
             vehicle = vehicles[vehicle_id]
             old_edge = edges[old_edge_id]
@@ -180,16 +211,22 @@ def run_simulation(
                 and old_edge_id in controlled_j1_edges
                 and old_s <= old_edge["length"] < new_s
             ):
-                j1_discharge_count += 1
+                step_j1_crossings += 1
 
             if new_edge_id == old_edge_id:
-                cumulative_distance += new_s - old_s
+                step_distance_m += new_s - old_s
             else:
-                cumulative_distance += old_edge["length"] - old_s + new_s
-            speed_integral += vehicle.v * dt_s
+                step_distance_m += old_edge["length"] - old_s + new_s
+            step_speed_integral_m += vehicle.v * dt_s
 
         violations = check_no_overlap(vehicles, lanes)
-        overlap_checks += 1
+        metrics.record_step(
+            distance_m=step_distance_m,
+            speed_integral_m=step_speed_integral_m,
+            j1_crossings=step_j1_crossings,
+            overlap_checks=1,
+            overlap_violations=len(violations),
+        )
         if violations:
             raise AssertionError(f"no-overlap invariant failed at t={now_s + dt_s:.1f}: {violations!r}")
 
@@ -232,6 +269,8 @@ def run_simulation(
 
     elapsed_s = time.perf_counter() - started
     return SimulationResult(
+        engine_version=ENGINE_VERSION,
+        seed=int(scenario["seed"]),
         duration_s=duration_s,
         dt_s=dt_s,
         steps=steps,
@@ -246,10 +285,11 @@ def run_simulation(
         delayed_attempts=spawn_state.delayed_attempts,
         spawn_records=tuple(spawn_state.records),
         trip_records=tuple(sorted(trips, key=lambda trip: trip.vehicle_id)),
-        j1_discharge_count=j1_discharge_count,
-        overlap_checks=overlap_checks,
-        overlap_violations=0,
-        cumulative_distance_m=cumulative_distance,
-        speed_integral_m=speed_integral,
+        frames=frame_recorder.frames,
+        j1_discharge_count=metrics.j1_discharge_count,
+        overlap_checks=metrics.overlap_checks,
+        overlap_violations=metrics.overlap_violations,
+        cumulative_distance_m=metrics.cumulative_distance_m,
+        speed_integral_m=metrics.speed_integral_m,
         elapsed_s=elapsed_s,
     )
