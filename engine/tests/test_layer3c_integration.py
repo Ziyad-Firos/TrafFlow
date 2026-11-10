@@ -149,7 +149,7 @@ def test_cumulative_distance_matches_speed_integral_across_edge_transition():
     assert abs(integrated_distance - measured_displacement) <= 1e-6 * len(vehicles)
 
 
-def test_d4_unreserved_race_overlaps_at_rear_clear_but_reservation_prevents_it():
+def test_d4_zipper_prevents_same_slot_race_even_when_reservations_are_disabled():
     network = {
         "edges": [
             {"id": "edge_A", "length": 100.0, "lanes": 2, "speed_limit": 13.9},
@@ -167,28 +167,14 @@ def test_d4_unreserved_race_overlaps_at_rear_clear_but_reservation_prevents_it()
         lanes = {"edge_A": [[1], [2]], "edge_B": [[]]}
         return vehicles, lanes, {1: "car", 2: "car"}
 
-    unreserved, unreserved_lanes, type_ids = fresh_race()
-    first_overlap_step = None
-    for step_number in range(1, 21):
-        step_network(
-            unreserved, unreserved_lanes, network, type_ids, {"car": CAR},
-            dt=0.1, use_reservations=False,
-        )
-        if check_no_overlap(unreserved, unreserved_lanes):
-            first_overlap_step = step_number
-            break
-    assert first_overlap_step == 4
-
-    reserved, reserved_lanes, type_ids = fresh_race()
-    b_front_crossings = 0
-    for step_number in range(1, 21):
-        b_before = reserved[2].s
-        step_network(reserved, reserved_lanes, network, type_ids, {"car": CAR}, dt=0.1)
-        assert check_no_overlap(reserved, reserved_lanes) == []
-        if b_before <= 100.0 < reserved[2].s and reserved[2].edge_id == "edge_A":
-            b_front_crossings += 1
-            a = reserved[1]
-            b_overflow = reserved[2].s - 100.0
-            assert a.edge_id == "edge_B"
-            assert a.s - a.length >= b_overflow + CAR["s0_m"]
-    assert b_front_crossings == 1
+    for use_reservations in (False, True):
+        vehicles, lanes, type_ids = fresh_race()
+        merge_state = {}
+        for step_number in range(1, 21):
+            step_network(
+                vehicles, lanes, network, type_ids, {"car": CAR},
+                dt=0.1, use_reservations=use_reservations, merge_state=merge_state,
+            )
+            assert check_no_overlap(vehicles, lanes) == []
+            if step_number == 1:
+                assert sum(v.edge_id == "edge_A" and v.s > 100.0 for v in vehicles.values()) == 1

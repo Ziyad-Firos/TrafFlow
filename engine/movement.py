@@ -1,9 +1,10 @@
 """Snapshot movement and edge-transition application for the engine."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 from engine.dynamics import idm_acceleration, symplectic_euler_step
+from engine.merges import Approach, MergeSlot, arbitrate_merge_slot
 from engine.scenario import signal_phase_at
 from engine.state import LanesByEdge, Vehicle
 
@@ -17,15 +18,36 @@ def step_network(
     *,
     dt: float,
     use_reservations: bool = True,
+    merge_state: MutableMapping[MergeSlot, Approach] | None = None,
     time_s: float = 0.0,
     signals: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
-    """Advance one snapshot step, resolving transitions in ascending vehicle ID order."""
+    """Advance one snapshot step.
+
+    Pass `merge_state` across calls for a persistent run. `None` initializes
+    zipper state locally, which is convenient for single-step tests.
+    """
     edges = {edge["id"]: edge for edge in network["edges"]}
     connections = {
         (connection["from_edge"], connection["to_edge"]): connection["lanes"]
         for connection in network["connections"]
     }
+    approaches_by_slot: dict[MergeSlot, list[Approach]] = {}
+    for connection in network["connections"]:
+        source = connection["from_edge"]
+        target = connection["to_edge"]
+        for source_lane, target_lane in enumerate(connection["lanes"]):
+            if target_lane is not None:
+                slot = (target, target_lane)
+                approaches_by_slot.setdefault(slot, []).append((source, source_lane))
+    for slot, approaches in approaches_by_slot.items():
+        approaches.sort()
+    active_merge_state: MutableMapping[MergeSlot, Approach] = (
+        {} if merge_state is None else merge_state
+    )
+    for slot, approaches in approaches_by_slot.items():
+        if len(approaches) > 1:
+            active_merge_state.setdefault(slot, approaches[-1])
     nodes = {node["id"]: node for node in network.get("nodes", [])}
     signal_configs = signals or {}
 
@@ -142,64 +164,108 @@ def step_network(
         v_new = max(0.0, v_new)
         pending[vehicle_id] = (v_new, vehicle.s + v_new * dt)
 
-    # Reservations live only for this step. Their keys include the vehicle ID
-    # for diagnostics; physical capacity uses each reserved front and length.
+    # Reservations expire each step. Existing straddlers retain occupancy via
+    # the snapshot list above; new admissions reserve their downstream footprint.
     reservations: dict[tuple[str, int, int], tuple[float, float]] = {}
-    for vehicle_id in sorted(vehicles):
+    merge_candidates: dict[MergeSlot, dict[Approach, list[int]]] = {}
+    candidate_values: dict[int, tuple[float, float, str, int]] = {}
+
+    def finish_rear_clear(vehicle: Vehicle, next_edge_id: str, s_new: float, v_new: float) -> None:
+        current_edge_length = edges[vehicle.edge_id]["length"]
+        next_lane = connections[(vehicle.edge_id, next_edge_id)][vehicle.lane]
+        if s_new - vehicle.length >= current_edge_length:
+            vehicle.edge_id = next_edge_id
+            vehicle.lane = next_lane
+            vehicle.s = s_new - current_edge_length
+        else:
+            vehicle.s = s_new
+        vehicle.v = v_new
+
+    def admission_allowed(vehicle: Vehicle, next_edge_id: str, next_lane: int, s_new: float) -> bool:
+        edge = edges[vehicle.edge_id]
+        type_config = vehicle_types[vehicle_type_ids[vehicle.id]]
+        overflow = s_new - edge["length"]
+        available = entry_head_gap(next_edge_id, next_lane, reservations)
+        signal = signal_for_edge(vehicle.edge_id)
+        signal_open = signal is None or signal_open_at_step_start(signal)
+        return overflow + type_config["s0_m"] <= available and signal_open
+
+    def admit(vehicle_id: int) -> None:
+        vehicle = vehicles[vehicle_id]
+        edge = edges[vehicle.edge_id]
+        v_new, s_new, next_edge_id, next_lane = candidate_values[vehicle_id]
+        overflow = s_new - edge["length"]
+        if use_reservations:
+            reservations[(next_edge_id, next_lane, vehicle_id)] = (overflow, vehicle.length)
+        finish_rear_clear(vehicle, next_edge_id, s_new, v_new)
+
+    def hold_at_stop_line(vehicle_id: int) -> None:
         vehicle = vehicles[vehicle_id]
         edge = edges[vehicle.edge_id]
         type_config = vehicle_types[vehicle_type_ids[vehicle_id]]
-        v_new, s_new = pending[vehicle_id]
+        _v_new, s_new, _next_edge_id, _next_lane = candidate_values[vehicle_id]
+        old_s = vehicle.s
+        vehicle.s = min(s_new, max(old_s, edge["length"] - type_config["s0_m"]))
+        vehicle.v = (vehicle.s - old_s) / dt if dt > 0.0 else 0.0
+
+    # Previously admitted straddlers finish their edge bookkeeping first. They
+    # already own downstream space from an earlier step.
+    for vehicle_id in sorted(vehicles):
+        vehicle = vehicles[vehicle_id]
+        edge = edges[vehicle.edge_id]
         next_edge_id = route_next(vehicle)
-        blocked = False
-
-        # Once the rear has cleared, finish the bookkeeping transition. The
-        # crossing was admitted when the front first passed the edge end.
+        v_new, s_new = pending[vehicle_id]
         if vehicle.s > edge["length"] and next_edge_id is not None:
-            if s_new - vehicle.length >= edge["length"]:
-                next_lane = connections[(vehicle.edge_id, next_edge_id)][vehicle.lane]
-                vehicle.edge_id = next_edge_id
-                vehicle.lane = next_lane
-                vehicle.s = s_new - edge["length"]
-            else:
-                vehicle.s = s_new
+            finish_rear_clear(vehicle, next_edge_id, s_new, v_new)
+        elif s_new <= edge["length"] or next_edge_id is None:
+            vehicle.s = max(vehicle.s, s_new)
             vehicle.v = v_new
-            continue
-
-        if s_new > edge["length"] and next_edge_id is not None:
-            next_edge = edges[next_edge_id]
+        else:
             next_lane = connections[(vehicle.edge_id, next_edge_id)][vehicle.lane]
-            overflow = s_new - edge["length"]
-            available = (
-                entry_head_gap(next_edge_id, next_lane, reservations)
-                if next_lane is not None
-                else float("-inf")
-            )
-            signal = signal_for_edge(vehicle.edge_id)
-            signal_open = signal is None or signal_open_at_step_start(signal)
-            if (
-                next_lane is not None
-                and overflow + type_config["s0_m"] <= available
-                and signal_open
-            ):
-                if use_reservations:
-                    reservations[(next_edge_id, next_lane, vehicle_id)] = (overflow, vehicle.length)
+            if next_lane is None:
                 vehicle.s = s_new
                 vehicle.v = v_new
-                if vehicle.s - vehicle.length >= edge["length"]:
-                    vehicle.edge_id = next_edge_id
-                    vehicle.lane = next_lane
-                    vehicle.s -= edge["length"]
-                continue
-            s_new = min(s_new, max(vehicle.s, edge["length"] - type_config["s0_m"]))
-            blocked = True
+            else:
+                candidate_values[vehicle_id] = (v_new, s_new, next_edge_id, next_lane)
+                approach = (vehicle.edge_id, vehicle.lane)
+                merge_candidates.setdefault((next_edge_id, next_lane), {}).setdefault(approach, []).append(vehicle_id)
 
-        old_s = vehicle.s
-        vehicle.s = max(old_s, s_new)
-        if blocked:
-            vehicle.v = (vehicle.s - old_s) / dt if dt > 0.0 else 0.0
+    # Single-approach transitions retain ID ordering and use the same reservations.
+    single_approach_candidates = sorted(
+        vehicle_id
+        for slot, waiters in merge_candidates.items()
+        if len(approaches_by_slot[slot]) == 1
+        for vehicle_ids in waiters.values()
+        for vehicle_id in vehicle_ids
+    )
+    for vehicle_id in single_approach_candidates:
+        _v_new, s_new, next_edge_id, next_lane = candidate_values[vehicle_id]
+        if admission_allowed(vehicles[vehicle_id], next_edge_id, next_lane, s_new):
+            admit(vehicle_id)
         else:
-            vehicle.v = v_new
+            hold_at_stop_line(vehicle_id)
+
+    # Multi-approach slots use zipper order independently of vehicle-ID order.
+    for slot in sorted(merge_candidates):
+        approaches = approaches_by_slot[slot]
+        if len(approaches) <= 1:
+            continue
+        slot_waiters = merge_candidates[slot]
+
+        def can_reserve(vehicle_id: int) -> bool:
+            _v_new, s_new, next_edge_id, next_lane = candidate_values[vehicle_id]
+            return admission_allowed(vehicles[vehicle_id], next_edge_id, next_lane, s_new)
+
+        selected = arbitrate_merge_slot(
+            slot, approaches, active_merge_state, slot_waiters, can_reserve
+        )
+        selected_id = selected[1] if selected is not None else None
+        for vehicle_ids in slot_waiters.values():
+            for vehicle_id in vehicle_ids:
+                if vehicle_id == selected_id:
+                    admit(vehicle_id)
+                else:
+                    hold_at_stop_line(vehicle_id)
 
     rebuilt: LanesByEdge = {
         edge_id: [[] for _ in range(edge["lanes"])] for edge_id, edge in edges.items()
