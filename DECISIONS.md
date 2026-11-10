@@ -44,3 +44,9 @@ Clarification 1 of the 4b handoff claimed 'no multi-from-edge merges in v1.' Fac
 - On the 5-minute demo scenario (seed 20261110), unquantized result JSON is 3,795,460 bytes and gzip level 9 is 859,186 bytes (0.86 MB), 1,140,814 bytes below the 2,000,000-byte limit. Quantization, a 1 Hz recording rate, and a duration cap are therefore not applied.
 - `engine/benchmark.py` reports this payload size, active counts, elapsed seconds, and steps per second. The current run measured 2.077314 s and 1,444.17 steps/s on this machine.
 - The committed golden summary is generated from the reviewed demo scenario and seed 20261110. The test compares the exact deterministic summary bytes; runtime is excluded from the summary.
+
+## Revised S6 gate — unresolved
+
+- Prompt error #10: the original S6 specification used 10,000 veh/h without checking the measured spawn envelope from R6b. That demand was too high to distinguish signal capacity from origin insertion limits.
+- Revised run: arterial demand 5,000 veh/h, duration 600 s, seed 20261110, flyover disabled. Poisson scheduling produced 841 requests (mean `5000 * 600 / 3600 = 833.33`); 554 spawned and 287 remained pending. Thus spawn success was 65.9%, not the expected near-100%.
+- J1 recorded 324 crossings, so measured throughput was `324 * 3600 / 600 = 1,944 veh/h`. This is outside the 3,280–4,010 target band and does not repeat the earlier 1,716 veh/h value. Because insertion was still constrained, this run does not validate signal saturation capacity. S6 remains unresolved; do not claim the signal model is validated until a demand setup can keep arrivals within the spawn envelope while sustaining a J1 queue.
