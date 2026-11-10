@@ -41,13 +41,13 @@ def step_network(
             return None
         return signal
 
-    def signal_open_at(signal: Mapping[str, Any], crossing_time: float) -> bool:
+    def signal_open_at_step_start(signal: Mapping[str, Any]) -> bool:
         timing = {
             key: float(signal[key])
             for key in ("cycle_s", "green_s", "yellow_s", "red_s", "offset_s")
             if key in signal
         }
-        return signal_phase_at(timing, crossing_time) == "green"
+        return signal_phase_at(timing, time_s) == "green"
 
     def route_next(vehicle: Vehicle) -> str | None:
         route_index = vehicle.route.index(vehicle.edge_id)
@@ -112,25 +112,9 @@ def step_network(
                 entry_blocked = available < type_config["s0_m"] + vehicle.length
 
                 signal = signal_for_edge(vehicle.edge_id)
-                signal_blocked = False
-                if signal is not None:
-                    base_acceleration = idm_acceleration(
-                        v=vehicle.v,
-                        v_leader_or_none=leader_speed,
-                        gap=gap,
-                        v0=edge["speed_limit"],
-                        A=type_config["A_mps2"],
-                        B=type_config["B_mps2"],
-                        T=type_config["T_s"],
-                        s0=type_config["s0_m"],
-                    )
-                    projected_v = max(0.0, vehicle.v + base_acceleration * dt)
-                    projected_s = vehicle.s + projected_v * dt
-                    if projected_s > edge["length"] and projected_v > 0.0:
-                        crossing_time = time_s + (edge["length"] - vehicle.s) / projected_v
-                        signal_blocked = not signal_open_at(signal, crossing_time)
-                    else:
-                        signal_blocked = not signal_open_at(signal, time_s)
+                signal_blocked = (
+                    signal is not None and not signal_open_at_step_start(signal)
+                )
 
                 if entry_blocked or signal_blocked:
                     stop_gap = max(1e-9, edge["length"] - vehicle.s)
@@ -192,10 +176,7 @@ def step_network(
                 else float("-inf")
             )
             signal = signal_for_edge(vehicle.edge_id)
-            signal_open = True
-            if signal is not None and v_new > 0.0:
-                crossing_time = time_s + (edge["length"] - vehicle.s) / v_new
-                signal_open = signal_open_at(signal, crossing_time)
+            signal_open = signal is None or signal_open_at_step_start(signal)
             if (
                 next_lane is not None
                 and overflow + type_config["s0_m"] <= available

@@ -60,13 +60,13 @@ def _state(s=99.5):
 @pytest.mark.parametrize(
     ("time_s", "expected_s"),
     [
-        (53.8, 100.89),  # crossing at 53.836: green, entry is allowed
-        (53.97, 99.5),   # crossing at 54.006: yellow, entry is closed
-        (55.97, 99.5),   # crossing at 56.006: red
-        (79.97, 100.89), # crossing at 80.006: next cycle green
+        (53.8, 100.89),  # step starts green
+        (53.97, 100.89), # step starts green, even though the phase changes mid-step
+        (55.97, 99.5),   # step starts yellow: entry is closed
+        (79.97, 99.5),   # step starts red, even though green begins mid-step
     ],
 )
-def test_signal_phase_at_crossing_time_gates_stop_line_entry(time_s, expected_s):
+def test_signal_phase_at_step_start_gates_stop_line_entry(time_s, expected_s):
     vehicles, lanes = _state()
 
     step_network(
@@ -94,7 +94,7 @@ def test_vehicle_already_past_stop_line_continues_during_red():
         {1: "car"},
         {"car": CAR},
         dt=0.1,
-        time_s=55.97,
+        time_s=56.0,
         signals={"J": SIGNAL},
     )
 
@@ -135,7 +135,7 @@ def test_red_signal_does_not_gate_uncontrolled_minor_road():
         {2: "car"},
         {"car": car},
         dt=0.1,
-        time_s=55.97,
+        time_s=56.0,
         signals={"J": SIGNAL},
     )
 
