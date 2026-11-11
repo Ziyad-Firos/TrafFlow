@@ -58,7 +58,7 @@ export default function HomePage() {
       const response = await fetch(`${API}/runs/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scenario_json: adjusted, seed }) });
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail ?? JSON.stringify(body));
-      router.push(`/run/${body.run_id}?signal_green_s=${adjusted.signals[0]?.green_s ?? 54}`);
+      router.push(`/run?id=${body.run_id}&signal_green_s=${adjusted.signals[0]?.green_s ?? 54}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Run could not be completed.");
     } finally { setBusy(false); }
