@@ -1,0 +1,6 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "traf-flow",
+  "compatibility_date": "2026-11-01",
+  "assets": { "directory": "./out" }
+}
