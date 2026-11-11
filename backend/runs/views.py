@@ -116,7 +116,7 @@ class RunListCreateView(APIView):
 
         started = time.perf_counter()
         try:
-            result = run_simulation(scenario, network, max_runtime_s=10.0)
+            result = run_simulation(scenario, network, max_runtime_s=30.0)
         except TimeoutError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
         except (AssertionError, ValueError, KeyError) as exc:

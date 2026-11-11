@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt && python manage.py migrate
-    startCommand: gunicorn backend.config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 30
+    startCommand: gunicorn backend.config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 90
     healthCheckPath: /health/
     envVars:
       - key: PYTHON_VERSION
