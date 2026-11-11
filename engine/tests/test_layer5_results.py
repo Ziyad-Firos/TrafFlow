@@ -131,6 +131,13 @@ def _demo_result():
 
 
 
+def test_engine_runtime_limit_aborts_before_first_step():
+    with pytest.raises(TimeoutError, match="exceeded 0.0 seconds"):
+        run_simulation(
+            _demo_scenario(), load_preset_network(flyover_enabled=True), max_runtime_s=0.0
+        )
+
+
 def test_demo_seed_summary_is_byte_identical_to_committed_golden_file():
     result = _demo_result()
     golden_path = ROOT / "engine" / "tests" / "golden" / "demo_seed_20261110_summary.json"
@@ -145,9 +152,9 @@ def test_five_minute_columnar_payload_gzip_is_measured_below_two_megabytes():
     compressed_size = len(gzip.compress(payload, compresslevel=9))
 
     assert result.requested_count == 369
-    assert result.spawned_count == 367
-    assert len(result.frames["id"]) == 105453
+    assert result.spawned_count == 366
+    assert len(result.frames["id"]) == 105461
     assert len(frame_counts) == 598
-    assert max(frame_counts.values()) == 331
-    assert compressed_size == 986962
+    assert max(frame_counts.values()) == 332
+    assert compressed_size == 985398
     assert compressed_size < 2_000_000

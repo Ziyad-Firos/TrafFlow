@@ -163,6 +163,7 @@ def run_simulation(
     network: dict[str, Any],
     *,
     use_reservations: bool = True,
+    max_runtime_s: float | None = None,
 ) -> SimulationResult:
     """Precompute demand, then run fixed-dt movement with stepwise invariants."""
     started = time.perf_counter()
@@ -205,6 +206,8 @@ def run_simulation(
         }
 
     for step_index in range(steps):
+        if max_runtime_s is not None and time.perf_counter() - started > max_runtime_s:
+            raise TimeoutError(f"simulation exceeded {max_runtime_s:.1f} seconds")
         now_s = round(step_index * dt_s, 10)
         spawned_now = attempt_due_spawns(
             now_s, spawn_state, vehicles, lanes, network, scenario
